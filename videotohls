@@ -1,0 +1,106 @@
+import os
+import json
+import subprocess
+
+
+
+def info(fullhdname):
+    try:
+        cmd = f'ffprobe -v quiet -print_format json -show_entries format=duration:streams {str(fullhdname)}.mp4'
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err =  p.communicate()
+        info = json.loads(out)
+        # print(json.dumps(info, indent = 1))
+        streams = info['streams']
+        result = {
+                'video': ([x for x in streams
+                        if x['codec_type'] == 'video'] or [None])[0],
+                'audio': ([x for x in streams
+                        if x['codec_type'] == 'audio'] or [None]),
+                'subtitle': ([x for x in streams
+                        if x['codec_type'] == 'subtitle'] or [None])           
+            }
+        if 'duration' not in result['video']:
+            result['video']['duration'] = info['format']['duration']
+        return result
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError("command '{}' return with error (code {}): {}".format(e.cmd, e.returncode, e.output))
+    
+def transcode(details, foldername, fullhdname, hdname, sdname):
+    cmd = f'packager in={str(fullhdname)}.mp4,stream=video,init_segment={str(foldername)}/video{str(fullhdname)}/video_init.mp4,segment_template={str(foldername)}/video{str(fullhdname)}/video_$Number$.m4s,playlist_name={str(foldername)}/video{str(fullhdname)}/main.m3u8 in={str(hdname)}.mp4,stream=video,init_segment={str(foldername)}/video{str(hdname)}/video_init.mp4,segment_template={str(foldername)}/video{str(hdname)}/video_$Number$.m4s,playlist_name={str(foldername)}/video{str(hdname)}/main.m3u8 in={str(sdname)}.mp4,stream=video,init_segment={str(foldername)}/video{str(sdname)}/video_init.mp4,segment_template={str(foldername)}/video{str(sdname)}/video_$Number$.m4s,playlist_name={str(foldername)}/video{str(sdname)}/main.m3u8 --hls_master_playlist_output {str(foldername)}/master.m3u8'
+    try:
+        subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError("command '{}' return with error (code {}): {}".format(e.cmd, e.returncode, e.output))
+    audio = details['audio']
+    subtitle = details['subtitle']
+    with open(f'{str(foldername)}/master.m3u8', "a", encoding='utf-8') as master:
+            print("Creating Audios")
+            master.write("\n")
+            for i in range(0, len(audio)):
+                audio_playlists = f'audio{str(i+1)}/main.m3u8'    
+                cmd = f'packager in={str(fullhdname)}.mp4,stream={i+1},init_segment={str(foldername)}/audio{str(i+1)}/audio_init.mp4,segment_template={str(foldername)}/audio{str(i+1)}/audio_$Number$.m4s,playlist_name={str(foldername)}/audio{str(i+1)}/main.m3u8 --hls_master_playlist_output {str(foldername)}/master{str(i+1)}.m3u8'
+                try:
+                    subprocess.run(cmd, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                except subprocess.CalledProcessError as e:
+                    raise RuntimeError("command '{}' return with error (code {}): {}".format(e.cmd, e.returncode, e.output))
+                if os.path.exists(f"{str(foldername)}/master"+str(i+1)+".m3u8"):
+                    os.remove(f"{str(foldername)}/master"+str(i+1)+".m3u8")
+                for audio_idx in audio:
+                        if audio_idx["index"] == i+1: 
+                            print(audio_idx["tags"]["language"])
+                            master.write(f'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="audio",'
+                                        f'NAME="{audio_idx["tags"]["language"]}",LANGUAGE="{audio_idx["tags"]["language"]}",'
+                                        f'DEFAULT=NO,AUTOSELECT=YES,URI="{audio_playlists}"\n')
+            master.write("\n")
+            print("Creating Subtitles")
+            for i in range(0, len(subtitle)):
+                    if not os.path.exists(f'{str(foldername)}/subtitle'):
+                        os.makedirs(f'{str(foldername)}/subtitle')
+                    subtitle_playlist = f'{str(foldername)}/subtitle/subtitle{str(i)}.vtt'
+                    subtitle_command = f'ffmpeg -i {str(fullhdname)}.mp4 -map 0:s:{i} {subtitle_playlist}'
+                    try:
+                        subprocess.run(subtitle_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    except subprocess.CalledProcessError as e: 
+                        raise RuntimeError("command '{}' return with error (code {}): {}".format(e.cmd, e.returncode, e.output))
+                    shakesubtitle = f"packager in=subtitle{str(i)}.vtt,stream=text,output={str(foldername)}/subtitles/subtitle{str(i)}/subtitle.vtt,playlist_name={str(foldername)}/subtitles/subtitle{str(i)}/main.m3u8"
+                    try:
+                        subprocess.run(shakesubtitle, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                    except subprocess.CalledProcessError as e: 
+                        raise RuntimeError("command '{}' return with error (code {}): {}".format(e.cmd, e.returncode, e.output))
+                    for subtitleidx in subtitle:
+                        if subtitleidx["index"] == subtitleidx["index"]+i:
+                            print(subtitleidx["tags"]["language"])
+                            master.write(f'#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",'
+                                                    f'NAME="{subtitleidx["tags"]["language"]}",LANGUAGE="{subtitleidx["tags"]["language"]}",'
+                                                    f'DEFAULT=NO,FORCED=NO,AUTOSELECT=YES,URI="subtitle/subtitle{str((subtitleidx["index"])-(len(audio)+1))}/main'+str((subtitleidx["index"])-(len(audio)+1))+'.m3u8"\n')   
+            with open(f'{str(foldername)}/master.m3u8', 'r') as file :
+                filedata = file.read()
+                filedata = filedata.replace('CLOSED-CAPTIONS', 'AUDIO="audio",SUBTITLES="subs",CLOSED-CAPTIONS')
+            with open(f'{str(foldername)}/master.m3u8', 'w') as file:
+                    file.write(filedata)
+                    print("successfully completed")
+
+
+
+foldername= input("Give folder name:")
+fullhdname= input("Give 1080p file name:")
+hdname= input("Give 720p file name:")
+sdname= input("Give 480p file name:")              
+details = info(fullhdname)
+if details['video'] is None:
+            raise RuntimeError(f'no video track in input')
+if not details['audio']:
+    raise RuntimeError(f'no audio track in input, '
+                        'cannot do a separate audio track')
+if not details['subtitle']:
+    raise RuntimeError(f'no subtitle track in input, '
+                        'cannot do a separate subtitle track')
+
+transcode(details, foldername, fullhdname, hdname, sdname)
+
+with open('new.srt', 'r') as file :
+    filedata = file.read()
+    filedata = filedata.replace('', '')
+with open('new.srt', 'a') as file:
+    file.write(filedata)
