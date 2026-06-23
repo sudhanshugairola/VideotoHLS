@@ -23,3 +23,6 @@ Before running the converter, ensure your environment meets the following requir
    ```bash
    git clone [https://github.com/sudhanshugairola/VideotoHLS.git](https://github.com/sudhanshugairola/VideotoHLS.git)
    cd VideotoHLS
+   ./videotohls -i input.mp4 -o output_folder/stream.m3u8
+   or
+   ffmpeg -i input.mp4 -codec: copy -start_number 0 -hls_time 10 -hls_list_size 0 -f hls output_folder/playlist.m3u8
